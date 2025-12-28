@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TypingMind Plain Text Composer (Hide Original)
 // @namespace    vm-typingmind-plain-composer
-// @version      1.0
-// @description  Replace TypingMind input with a plain textarea overlay for smoother typing. Adds autogrow + drafts + cleanup + throttled MutationObserver + non-overlapping toggle UX.
+// @version      1.5
+// @description  Replace TypingMind input with a plain textarea overlay for smoother typing. Anchors to <main> + caps width to chat column. Smooth reveal (no jitter), autogrow + drafts + cleanup + stability-gated alignment + throttled MutationObserver + non-overlapping toggle UX.
 // @match        https://www.typingmind.com/*
 // @match        https://typingmind.com/*
 // @run-at       document-start
@@ -12,45 +12,41 @@
 (function () {
   "use strict";
 
-  // ---- Config ----
   const CONFIG = {
-    textareaWidth: "720px",
+    fallbackThreadMaxWidthPx: 760,
 
-    // Autogrow behavior
     minHeightPx: 30,
     maxHeightVh: 35,
 
     fontSize: "15px",
     lineHeight: "1.4",
 
-    // If true we hide the real TypingMind textarea when in plain mode
     hideOriginalComposer: true,
 
-    // Draft persistence
     persistDrafts: true,
     clearDraftOnSend: true,
     draftSaveDebounceMs: 250,
 
-    // Cleanup / retention
     draftTtlDays: 30,
     maxDraftEntries: 200,
 
-    // Hotkeys
-    sendHotkeyRequiresCtrlOrCmd: true, // Ctrl/Cmd+Enter sends, Enter inserts newline
+    sendHotkeyRequiresCtrlOrCmd: true,
 
-    // MutationObserver throttling
     mutationThrottleMs: 200,
 
-    // Toggle UX (avoid overlap)
     hidePlainComposerWhenOriginalShown: true,
     showReturnButtonWhenOriginalShown: true,
 
-    // Sending strategy
-    // Try these in order:
     trySendViaCtrlEnter: true,
     trySendViaMetaEnter: true,
-    trySendViaPlainEnter: true, // some TypingMind setups send with Enter
+    trySendViaPlainEnter: true,
     trySendViaSendButton: true,
+
+    // ---- Layout stability gate ----
+    stableRequiredCount: 5,
+    stableCheckIntervalMs: 80,
+    stableTolerancePx: 2,
+    postLockSyncIntervalMs: 350,
   };
 
   const STATE = {
@@ -68,9 +64,24 @@
     saveTimer: null,
     lastSavedValue: null,
     cleanedThisSession: false,
+
+    lastAnchorSig: "",
+    hasShownOnce: false,
+
+    // stability gating
+    layoutStableCount: 0,
+    layoutLastGeom: null,
+    layoutLocked: false,
+
+    // NEW: native was visible at least once
+    nativeSeenOnce: false,
+
+    // timers
+    fastTimer: null,
+    slowTimer: null,
   };
 
-  // ---- Helpers ----
+  // ---- helpers ----
   function log(...args) {
     console.log("[TMPlainComposer]", ...args);
   }
@@ -91,6 +102,38 @@
     return Date.now();
   }
 
+  function isElementVisible(el) {
+    if (!el) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
+    const r = el.getBoundingClientRect();
+    return !!(r.width && r.height);
+  }
+
+  function nearlyEqual(a, b, tol) {
+    return Math.abs(a - b) <= tol;
+  }
+
+  function updateLayoutStability(left, width, maxW) {
+    const tol = CONFIG.stableTolerancePx;
+    const prev = STATE.layoutLastGeom;
+    const curr = { left, width, maxW };
+
+    if (
+      prev &&
+      nearlyEqual(prev.left, curr.left, tol) &&
+      nearlyEqual(prev.width, curr.width, tol) &&
+      nearlyEqual(prev.maxW, curr.maxW, tol)
+    ) {
+      STATE.layoutStableCount++;
+    } else {
+      STATE.layoutStableCount = 0;
+    }
+
+    STATE.layoutLastGeom = curr;
+    return STATE.layoutStableCount >= CONFIG.stableRequiredCount;
+  }
+
   // ---- TypingMind selectors ----
   function getRealTextarea() {
     return (
@@ -101,22 +144,50 @@
     );
   }
 
+  function getChatInputContainer() {
+    return (
+      qs('[data-element-id="message-input"]') ||
+      qs('[data-element-id="chat-space-end-part"]') ||
+      qs('[data-element-id="input-row"]') ||
+      qs('[data-element-id="chat-input-textbox-container"]') ||
+      null
+    );
+  }
+
   function getSendButtonCandidate() {
-    // TypingMind changes its send button markup. We attempt a few heuristics.
-    // If none found, we rely on key events.
     const candidates = []
       .concat(qsa('button[data-element-id*="send"]'))
       .concat(qsa('button[aria-label*="Send"]'))
       .concat(qsa('button[title*="Send"]'));
-
-    // Choose first enabled
     return candidates.find((b) => !b.disabled) || null;
+  }
+
+  function getMainAnchor() {
+    const mains = qsa("main");
+    for (const m of mains) {
+      const cls = m.className || "";
+      const oy = getComputedStyle(m).overflowY;
+      const looksScrollable =
+        cls.includes("overflow-y-auto") ||
+        cls.includes("overflow-y-scroll") ||
+        oy === "auto" ||
+        oy === "scroll";
+
+      if (looksScrollable && isElementVisible(m)) return m;
+    }
+
+    const mca = qs('[data-element-id="main-content-area"]');
+    if (isElementVisible(mca)) return mca;
+
+    const bg = qs('[data-element-id="chat-space-background"]');
+    if (isElementVisible(bg)) return bg;
+
+    return document.documentElement;
   }
 
   function hideRealTextarea(real) {
     if (!real) return;
     if (real.dataset.tmPlainHidden) return;
-
     real.dataset.tmPlainHidden = "1";
     real.style.display = "none";
   }
@@ -124,7 +195,6 @@
   function showRealTextarea(real) {
     if (!real) return;
     if (!real.dataset.tmPlainHidden) return;
-
     delete real.dataset.tmPlainHidden;
     real.style.display = "";
   }
@@ -175,7 +245,9 @@
 
       const obj = safeJsonParse(raw);
       if (!obj || typeof obj !== "object") {
-        try { localStorage.removeItem(k); } catch {}
+        try {
+          localStorage.removeItem(k);
+        } catch {}
         continue;
       }
 
@@ -183,7 +255,9 @@
       const text = typeof obj.text === "string" ? obj.text : "";
 
       if (!ts || ts < cutoff || text.length === 0) {
-        try { localStorage.removeItem(k); } catch {}
+        try {
+          localStorage.removeItem(k);
+        } catch {}
         continue;
       }
 
@@ -194,7 +268,9 @@
       entries.sort((a, b) => b.ts - a.ts);
       const toRemove = entries.slice(CONFIG.maxDraftEntries);
       for (const e of toRemove) {
-        try { localStorage.removeItem(e.key); } catch {}
+        try {
+          localStorage.removeItem(e.key);
+        } catch {}
       }
     }
   }
@@ -210,7 +286,6 @@
     try {
       const raw = localStorage.getItem(key);
       if (!raw) return;
-
       const obj = safeJsonParse(raw);
       if (obj && typeof obj.text === "string" && obj.text.length > 0) {
         STATE.textareaEl.value = obj.text;
@@ -233,8 +308,7 @@
 
     STATE.saveTimer = setTimeout(() => {
       try {
-        const payload = JSON.stringify({ text: val, ts: nowMs() });
-        localStorage.setItem(STATE.draftKey, payload);
+        localStorage.setItem(STATE.draftKey, JSON.stringify({ text: val, ts: nowMs() }));
         STATE.lastSavedValue = val;
       } catch (e) {
         log("Draft save failed:", e);
@@ -243,9 +317,7 @@
   }
 
   function clearDraft() {
-    if (!CONFIG.persistDrafts) return;
-    if (!STATE.draftKey) return;
-
+    if (!CONFIG.persistDrafts || !STATE.draftKey) return;
     try {
       localStorage.removeItem(STATE.draftKey);
       STATE.lastSavedValue = "";
@@ -263,21 +335,111 @@
     textarea.style.height = `${newPx}px`;
   }
 
-  // ---- UI (same look as ChatGPT version) ----
-  function styleButton(btn) {
-    btn.style.border = "1px solid rgba(255,255,255,0.2)";
-    btn.style.borderRadius = "8px";
-    btn.style.padding = "8px 10px";
-    btn.style.cursor = "pointer";
-    btn.style.background = "rgba(255,255,255,0.10)";
-    btn.style.color = "#fff";
-    btn.style.fontSize = "13px";
-    btn.style.userSelect = "none";
+  // ---- Alignment scaffold ----
+  function ensureAlignerScaffold() {
+    if (!STATE.wrapperEl) return null;
+
+    let aligner = STATE.wrapperEl.querySelector("#vm-tm-aligner");
+    if (!aligner) {
+      aligner = document.createElement("div");
+      aligner.id = "vm-tm-aligner";
+      aligner.style.position = "fixed";
+      aligner.style.bottom = "0";
+      aligner.style.zIndex = "2147483000";
+      aligner.style.padding = "10px";
+      aligner.style.boxSizing = "border-box";
+      aligner.style.pointerEvents = "none";
+      aligner.style.transition = "left 120ms ease, width 120ms ease";
+      aligner.style.willChange = "left, width";
+
+      const panel = STATE.wrapperEl.firstElementChild;
+      STATE.wrapperEl.innerHTML = "";
+      aligner.appendChild(panel);
+      STATE.wrapperEl.appendChild(aligner);
+
+      panel.style.pointerEvents = "auto";
+      panel.style.width = "100%";
+      panel.style.maxWidth = "unset";
+      panel.style.margin = "0";
+    }
+
+    let threadWrap = aligner.querySelector("#vm-tm-threadwrap");
+    if (!threadWrap) {
+      threadWrap = document.createElement("div");
+      threadWrap.id = "vm-tm-threadwrap";
+      threadWrap.style.pointerEvents = "none";
+      threadWrap.style.marginLeft = "auto";
+      threadWrap.style.marginRight = "auto";
+      threadWrap.style.maxWidth = `${CONFIG.fallbackThreadMaxWidthPx}px`;
+
+      const panel = aligner.firstElementChild;
+      aligner.innerHTML = "";
+      threadWrap.appendChild(panel);
+      aligner.appendChild(threadWrap);
+
+      panel.style.pointerEvents = "auto";
+      panel.style.width = "100%";
+      panel.style.maxWidth = "unset";
+      panel.style.margin = "0";
+    }
+
+    return { aligner, threadWrap };
   }
 
+  function syncOverlayToTypingMindLayout() {
+    if (!STATE.wrapperEl) return false;
+
+    const anchor = getMainAnchor();
+    const rect = anchor.getBoundingClientRect();
+
+    const vw = window.innerWidth || 1;
+    if (!rect.width || rect.width < 200 || rect.width > vw * 1.2) return false;
+
+    const scaffold = ensureAlignerScaffold();
+    if (!scaffold) return false;
+
+    const { aligner, threadWrap } = scaffold;
+
+    const left = Math.round(rect.left);
+    const width = Math.round(rect.width);
+
+    aligner.style.left = `${left}px`;
+    aligner.style.width = `${width}px`;
+
+    const inputContainer = getChatInputContainer();
+    if (inputContainer) {
+      const r2 = inputContainer.getBoundingClientRect();
+      if (r2.width && r2.width > 320 && r2.width < vw * 1.05) {
+        threadWrap.style.maxWidth = `${Math.round(r2.width)}px`;
+      }
+    }
+
+    const maxW = Math.round(parseFloat(threadWrap.style.maxWidth || "0"));
+    const hasReasonableWidth = maxW && maxW > 320;
+
+    const sig = `${left}:${width}:${maxW}`;
+    if (sig !== STATE.lastAnchorSig) STATE.lastAnchorSig = sig;
+
+    // IMPORTANT: use "seen once" gating
+    const nativeReady = STATE.nativeSeenOnce;
+
+    const stable = updateLayoutStability(left, width, maxW);
+
+    if (!STATE.hasShownOnce && nativeReady && stable && hasReasonableWidth) {
+      STATE.hasShownOnce = true;
+      STATE.layoutLocked = true;
+
+      STATE.wrapperEl.style.opacity = "1";
+      STATE.wrapperEl.style.transform = "translateY(0)";
+    }
+
+    return true;
+  }
+
+  // ---- Toggle UX ----
   function setPlainComposerVisible(visible) {
     if (!STATE.wrapperEl) return;
-    STATE.wrapperEl.style.display = visible ? "flex" : "none";
+    STATE.wrapperEl.style.display = visible ? "block" : "none";
   }
 
   function ensureReturnButton() {
@@ -306,19 +468,16 @@
 
     btn.addEventListener("click", () => {
       STATE.originalVisibleByUser = false;
-
       const real = getRealTextarea();
-      if (real && CONFIG.hideOriginalComposer) {
-        hideRealTextarea(real);
-      }
+      if (real && CONFIG.hideOriginalComposer && isElementVisible(real)) hideRealTextarea(real);
 
       btn.style.display = "none";
       setPlainComposerVisible(true);
 
+      syncOverlayToTypingMindLayout();
       if (STATE.textareaEl) STATE.textareaEl.focus();
     });
 
-    // append to documentElement early (document-start safe)
     document.documentElement.appendChild(btn);
     STATE.returnBtnEl = btn;
     return btn;
@@ -328,6 +487,109 @@
     const btn = ensureReturnButton();
     if (!btn) return;
     btn.style.display = show ? "block" : "none";
+  }
+
+  // ---- Sending ----
+  function setNativeValue(textarea, value) {
+    const proto = Object.getPrototypeOf(textarea);
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && typeof desc.set === "function") desc.set.call(textarea, value);
+    else textarea.value = value;
+  }
+
+  function dispatchKey(target, { key, code, ctrlKey, metaKey }) {
+    const down = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key,
+      code,
+      which: 13,
+      keyCode: 13,
+      ctrlKey: !!ctrlKey,
+      metaKey: !!metaKey,
+    });
+    target.dispatchEvent(down);
+
+    const up = new KeyboardEvent("keyup", {
+      bubbles: true,
+      cancelable: true,
+      key,
+      code,
+      which: 13,
+      keyCode: 13,
+      ctrlKey: !!ctrlKey,
+      metaKey: !!metaKey,
+    });
+    target.dispatchEvent(up);
+  }
+
+  async function sendPlainMessage() {
+    const text = STATE.textareaEl?.value ?? "";
+    if (!text.trim()) return;
+
+    const real = getRealTextarea();
+    if (!real) return;
+
+    const wasHidden = real.style.display === "none";
+    if (wasHidden) showRealTextarea(real);
+
+    setNativeValue(real, text);
+    real.dispatchEvent(new Event("input", { bubbles: true }));
+    real.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await sleep(30);
+
+    if (CONFIG.trySendViaCtrlEnter) {
+      dispatchKey(real, { key: "Enter", code: "Enter", ctrlKey: true, metaKey: false });
+      await sleep(40);
+    }
+    if (CONFIG.trySendViaMetaEnter && real.value === text) {
+      dispatchKey(real, { key: "Enter", code: "Enter", ctrlKey: false, metaKey: true });
+      await sleep(40);
+    }
+    if (CONFIG.trySendViaPlainEnter && real.value === text) {
+      dispatchKey(real, { key: "Enter", code: "Enter", ctrlKey: false, metaKey: false });
+      await sleep(40);
+    }
+    if (CONFIG.trySendViaSendButton && real.value === text) {
+      const btn = getSendButtonCandidate();
+      if (btn) btn.click();
+      await sleep(60);
+    }
+
+    if (real.value === text) {
+      if (!STATE.originalVisibleByUser && CONFIG.hideOriginalComposer && isElementVisible(real)) {
+        hideRealTextarea(real);
+      }
+      return;
+    }
+
+    if (CONFIG.clearDraftOnSend) clearDraft();
+
+    STATE.textareaEl.value = "";
+    STATE.lastSavedValue = "";
+    autogrow(STATE.textareaEl);
+
+    if (!STATE.originalVisibleByUser && CONFIG.hideOriginalComposer && isElementVisible(real)) {
+      hideRealTextarea(real);
+    }
+  }
+
+  // ---- UI ----
+  function styleButton(btn) {
+    btn.style.border = "1px solid rgba(255,255,255,0.2)";
+    btn.style.borderRadius = "8px";
+    btn.style.padding = "8px 10px";
+    btn.style.cursor = "pointer";
+    btn.style.background = "rgba(255,255,255,0.10)";
+    btn.style.color = "#fff";
+    btn.style.fontSize = "13px";
+    btn.style.userSelect = "none";
+  }
+
+  function appendSafe(el) {
+    if (document.body) document.body.appendChild(el);
+    else document.documentElement.appendChild(el);
   }
 
   function createPlainComposerUI() {
@@ -341,15 +603,18 @@
     wrapper.style.right = "0";
     wrapper.style.bottom = "0";
     wrapper.style.zIndex = "2147483000";
-    wrapper.style.display = "flex";
-    wrapper.style.justifyContent = "center";
-    wrapper.style.padding = "10px";
+    wrapper.style.display = "block";
+    wrapper.style.padding = "0";
     wrapper.style.pointerEvents = "none";
+
+    wrapper.style.opacity = "0";
+    wrapper.style.transform = "translateY(6px)";
+    wrapper.style.transition = "opacity 120ms ease, transform 120ms ease";
 
     const panel = document.createElement("div");
     panel.style.pointerEvents = "auto";
-    panel.style.width = CONFIG.textareaWidth;
-    panel.style.maxWidth = "calc(100vw - 20px)";
+    panel.style.width = "100%";
+    panel.style.maxWidth = "unset";
     panel.style.border = "1px solid rgba(128,128,128,0.35)";
     panel.style.borderRadius = "10px";
     panel.style.background = "rgba(20,20,20,0.85)";
@@ -412,9 +677,7 @@
     panel.appendChild(textarea);
     panel.appendChild(row);
     wrapper.appendChild(panel);
-
-    // append early; body may not exist yet
-    document.documentElement.appendChild(wrapper);
+    appendSafe(wrapper);
 
     sendBtn.addEventListener("click", () => sendPlainMessage());
     toggleBtn.addEventListener("click", () => toggleOriginalComposer());
@@ -427,7 +690,6 @@
           sendPlainMessage();
         }
       }
-
       if (e.key === "Escape") {
         e.preventDefault();
         toggleOriginalComposer();
@@ -439,21 +701,21 @@
       saveDraftDebounced();
     });
 
-    window.addEventListener("resize", () => autogrow(textarea));
+    window.addEventListener("resize", () => {
+      autogrow(textarea);
+      syncOverlayToTypingMindLayout();
+    });
 
     STATE.wrapperEl = wrapper;
     STATE.textareaEl = textarea;
 
-    // Ensure return button exists (hidden by default)
     ensureReturnButton();
-
-    // Draft will be loaded when DOM is ready enough (we call loadDraftIfAny() later too)
-    // but we can already try now:
     loadDraftIfAny();
     autogrow(textarea);
+
+    syncOverlayToTypingMindLayout();
   }
 
-  // ---- Toggle Original ----
   function toggleOriginalComposer() {
     const real = getRealTextarea();
     if (!real) return;
@@ -466,135 +728,39 @@
 
       if (CONFIG.hidePlainComposerWhenOriginalShown) setPlainComposerVisible(false);
       showReturnButton(true);
-
       real.focus();
     } else {
-      if (CONFIG.hideOriginalComposer) hideRealTextarea(real);
+      if (CONFIG.hideOriginalComposer && isElementVisible(real)) hideRealTextarea(real);
       STATE.originalVisibleByUser = false;
 
       showReturnButton(false);
       setPlainComposerVisible(true);
 
+      syncOverlayToTypingMindLayout();
       if (STATE.textareaEl) STATE.textareaEl.focus();
-    }
-  }
-
-  // ---- Sending ----
-  function setNativeValue(textarea, value) {
-    const proto = Object.getPrototypeOf(textarea);
-    const desc = Object.getOwnPropertyDescriptor(proto, "value");
-    if (desc && typeof desc.set === "function") {
-      desc.set.call(textarea, value);
-    } else {
-      textarea.value = value;
-    }
-  }
-
-  function dispatchKey(target, { key, code, ctrlKey, metaKey }) {
-    const down = new KeyboardEvent("keydown", {
-      bubbles: true,
-      cancelable: true,
-      key,
-      code,
-      which: 13,
-      keyCode: 13,
-      ctrlKey: !!ctrlKey,
-      metaKey: !!metaKey,
-    });
-    target.dispatchEvent(down);
-
-    const up = new KeyboardEvent("keyup", {
-      bubbles: true,
-      cancelable: true,
-      key,
-      code,
-      which: 13,
-      keyCode: 13,
-      ctrlKey: !!ctrlKey,
-      metaKey: !!metaKey,
-    });
-    target.dispatchEvent(up);
-  }
-
-  async function sendPlainMessage() {
-    const text = STATE.textareaEl?.value ?? "";
-    if (!text.trim()) return;
-
-    const real = getRealTextarea();
-    if (!real) {
-      log("Real textarea not found; cannot send.");
-      return;
-    }
-
-    // Show it briefly if hidden, because some apps ignore events on display:none
-    const wasHidden = real.style.display === "none";
-    if (wasHidden) showRealTextarea(real);
-
-    // Set value and dispatch input events
-    setNativeValue(real, text);
-    real.dispatchEvent(new Event("input", { bubbles: true }));
-    real.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Let TypingMind react
-    await sleep(30);
-
-    // Try to trigger send in multiple ways
-    if (CONFIG.trySendViaCtrlEnter) {
-      dispatchKey(real, { key: "Enter", code: "Enter", ctrlKey: true, metaKey: false });
-      await sleep(40);
-    }
-
-    if (CONFIG.trySendViaMetaEnter && real.value === text) {
-      dispatchKey(real, { key: "Enter", code: "Enter", ctrlKey: false, metaKey: true });
-      await sleep(40);
-    }
-
-    if (CONFIG.trySendViaPlainEnter && real.value === text) {
-      dispatchKey(real, { key: "Enter", code: "Enter", ctrlKey: false, metaKey: false });
-      await sleep(40);
-    }
-
-    if (CONFIG.trySendViaSendButton && real.value === text) {
-      const btn = getSendButtonCandidate();
-      if (btn) btn.click();
-      await sleep(60);
-    }
-
-    // If TypingMind did not clear/change its textarea, consider send failed.
-    // Restore our text so you never lose it.
-    if (real.value === text) {
-      log("Send attempt may have failed (TypingMind did not clear original textarea). Text restored.");
-      // Restore hidden state if needed
-      if (!STATE.originalVisibleByUser && CONFIG.hideOriginalComposer) hideRealTextarea(real);
-      return;
-    }
-
-    // Success case (textarea changed/cleared)
-    if (CONFIG.clearDraftOnSend) clearDraft();
-    STATE.textareaEl.value = "";
-    STATE.lastSavedValue = "";
-    autogrow(STATE.textareaEl);
-
-    if (!STATE.originalVisibleByUser && CONFIG.hideOriginalComposer) {
-      hideRealTextarea(real);
     }
   }
 
   // ---- Install & Observe ----
   function installIfNeeded() {
-    // Always create UI (this is what your previous script lacked robustness on)
     createPlainComposerUI();
 
     const real = getRealTextarea();
-    if (!real) return;
+    if (real) {
+      if (STATE.lastKnownRealTextarea !== real) {
+        STATE.lastKnownRealTextarea = real;
+      }
 
-    STATE.lastKnownRealTextarea = real;
+      // Set nativeSeenOnce BEFORE hiding
+      if (isElementVisible(real)) {
+        STATE.nativeSeenOnce = true;
+      }
 
-    if (CONFIG.hideOriginalComposer && !STATE.originalVisibleByUser) {
-      hideRealTextarea(real);
+      if (CONFIG.hideOriginalComposer && !STATE.originalVisibleByUser) {
+        if (STATE.nativeSeenOnce && isElementVisible(real)) hideRealTextarea(real);
+      }
     }
 
-    // Keep drafts synced per URL
     const newKey = computeDraftKey();
     if (CONFIG.persistDrafts && STATE.draftKey && newKey !== STATE.draftKey) {
       STATE.draftKey = newKey;
@@ -603,27 +769,8 @@
       STATE.draftKey = newKey;
       loadDraftIfAny();
     }
-  }
 
-  function handleMutations() {
-    // Keep trying to bind to the real textarea (SPA re-renders)
-    const real = getRealTextarea();
-    if (real && STATE.lastKnownRealTextarea !== real) {
-      STATE.lastKnownRealTextarea = real;
-
-      if (CONFIG.hideOriginalComposer && !STATE.originalVisibleByUser) {
-        hideRealTextarea(real);
-      }
-    }
-
-    // Also check URL changes for draft key updates
-    if (CONFIG.persistDrafts && STATE.textareaEl) {
-      const newKey = computeDraftKey();
-      if (STATE.draftKey && newKey !== STATE.draftKey) {
-        STATE.draftKey = newKey;
-        loadDraftIfAny();
-      }
-    }
+    syncOverlayToTypingMindLayout();
   }
 
   function makeThrottledHandler(fn, intervalMs) {
@@ -653,26 +800,28 @@
   }
 
   function run() {
-    // Create UI as early as possible
     installIfNeeded();
 
-    // Keep trying: TypingMind may render input later
-    setInterval(installIfNeeded, 1000);
+    // Phase 1: fast checks until stable lock
+    STATE.fastTimer = setInterval(() => {
+      installIfNeeded();
 
-    const throttledMutationHandler = makeThrottledHandler(
-      () => {
-        installIfNeeded();
-        handleMutations();
-      },
-      CONFIG.mutationThrottleMs
-    );
+      if (STATE.layoutLocked) {
+        clearInterval(STATE.fastTimer);
+        STATE.fastTimer = null;
 
-    const observer = new MutationObserver(throttledMutationHandler);
+        // Phase 2: slow checks
+        if (!STATE.slowTimer) {
+          STATE.slowTimer = setInterval(installIfNeeded, CONFIG.postLockSyncIntervalMs);
+        }
+      }
+    }, CONFIG.stableCheckIntervalMs);
+
+    const throttled = makeThrottledHandler(installIfNeeded, CONFIG.mutationThrottleMs);
+    const observer = new MutationObserver(throttled);
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    log("Initialized TypingMind Plain Composer v1.0", {
-      mutationThrottleMs: CONFIG.mutationThrottleMs,
-    });
+    log("Initialized TypingMind Plain Composer v1.5 (nativeSeenOnce gating).");
   }
 
   run();
