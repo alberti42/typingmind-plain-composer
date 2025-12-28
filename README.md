@@ -1,21 +1,21 @@
 # TypingMind Plain Text Composer (userscript)
 
-A lightweight userscript for **TypingMind** that replaces the native rich composer with a **plain `<textarea>` overlay** for **smoother typing** — especially in long chats where the DOM becomes heavy and the native composer starts lagging.
+**A lightweight userscript for TypingMind that replaces the native rich composer with a plain `<textarea>` overlay for smoother typing** — especially in long chats where the DOM becomes heavy and the original composer starts lagging.
 
 ---
 
 ## Why this exists
 
 TypingMind’s original message composer is feature-rich and integrates deeply with the app UI.  
-However, in long conversations (or when the chat DOM becomes complex), typing can become **noticeably laggy**, including:
+However, in long conversations (or when the chat DOM becomes complex), typing can become **noticeably laggy**, for example:
 
-- long input latency (characters appear late)
+- input latency (characters appear late)
 - dropped keystrokes
 - slow cursor movement
-- pauses while the app rerenders
-- worse behavior on lower-end laptops or when many tabs are open
+- pauses during rerenders
+- worse behavior on lower-end laptops or with many tabs open
 
-This usually happens because the original composer is tied to a React/Tailwind UI layer and may trigger expensive DOM work and layout/paint operations while typing, especially when the page is also updating message history, toolbars, animations, etc.
+This typically happens because the original composer is tied into the app’s React/Tailwind UI layer and may trigger expensive DOM work and layout/paint operations while typing, especially when the page is also updating message history, toolbars, animations, etc.
 
 ---
 
@@ -25,44 +25,46 @@ This userscript provides a **plain text input overlay** that:
 
 ✅ feels like typing into a native text editor  
 ✅ avoids the heavy composer DOM and rerender pipeline  
-✅ still sends messages through TypingMind normally (it copies text into the real textarea and triggers send)  
+✅ still sends messages through TypingMind normally (copies text into the real textarea and triggers send)  
 ✅ keeps your drafts (per chat URL)  
 ✅ supports autogrow  
-✅ supports a toggle to temporarily bring back the original composer  
-✅ avoids “jitter” during TypingMind hydration by waiting for stable layout before showing
+✅ supports toggling back to the original composer  
+✅ avoids “jitter” during TypingMind hydration by waiting for stable layout before showing  
 
 ---
 
 ## Screenshot
 
-![TypingMind Plain Text Composer](typingmind-plain-composer.png)
+![TypingMind Plain Text Composer](typingmind-plain-composer.jpg)
 
 ---
 
 ## Features
 
 - **Plain textarea overlay** for fast input
+- **Enter inserts a newline**
+- **Ctrl/Cmd + Enter to send**
 - **Autogrow** (up to a percentage of the viewport height)
 - **Per-chat drafts** saved to `localStorage`
-- **Draft cleanup** with TTL + maximum entries
-- **Ctrl/Cmd + Enter to send**
+- **Draft cleanup** (TTL + maximum number of entries)
 - **Esc** toggles the original TypingMind composer
 - **“Plain Composer” floating button** appears when the original composer is shown
-- **Stable anchoring**:
-  - Composer stays centered with the TypingMind chat column
-  - No bouncing during load / React hydration
+- **Stable anchoring**
+  - stays centered with the TypingMind chat column
+  - avoids bouncing during load / React hydration
 - **Throttled MutationObserver** for SPA rerenders
 
 ---
 
 ## Installation
 
-### 1) Install ViolentMonkey
-- Chrome / Chromium browsers: install **ViolentMonkey** extension
-- Firefox: install **ViolentMonkey** add-on
+### 1) Install a userscript manager
+- Chrome / Chromium: **ViolentMonkey**
+- Firefox: **ViolentMonkey**
+- (Other managers may work too.)
 
 ### 2) Install the script
-1. Open ViolentMonkey dashboard
+1. Open the ViolentMonkey dashboard
 2. Click **New Script**
 3. Paste the content of `typingmind-plain-composer.user.js`
 4. Save
@@ -73,24 +75,24 @@ Go to:
 or
 - https://www.typingmind.com
 
-The plain composer should appear once TypingMind has fully loaded and its layout has stabilized.
+The plain composer appears once TypingMind has fully loaded and the layout has stabilized.
 
 ---
 
 ## Usage
 
 ### Typing
-- Just type normally in the overlay textarea.
+- Type normally in the overlay textarea.
 - Drafts are saved automatically (per chat URL).
 
 ### Sending
-- Press **Ctrl+Enter** (Windows/Linux) or **Cmd+Enter** (macOS)
+- **Ctrl+Enter** (Windows/Linux) or **Cmd+Enter** (macOS)
 - Or click **Send**
 
 ### Toggling the original composer
 - Press **Esc**, or click **Toggle Original**
-- When the original is visible, a floating button appears:
-  - **Plain Composer** → return to overlay
+- When the original composer is visible, a floating button appears:
+  - **Plain Composer** → return to the overlay
 
 ---
 
@@ -102,14 +104,21 @@ TypingMind’s native composer remains in the DOM, but the script:
 2. Measures the chat column geometry (`<main>` / scroll container) and the native input container width
 3. Creates an overlay textarea
 4. Anchors the overlay to the same horizontal region as the chat column
-5. Hides the original textarea (optional / default)
+5. Hides the original textarea (default)
 6. On send, copies the overlay text into the real TypingMind textarea and triggers send using a sequence of strategies:
    - Ctrl+Enter
    - Cmd+Enter
    - Enter
-   - Send button click fallback
+   - send button click (fallback)
 
-To prevent the overlay from “moving around” during initial React hydration, the overlay only becomes visible once the page layout is stable for several consecutive checks.
+To prevent the overlay from moving around during initial React hydration, the overlay only becomes visible once the layout is stable for several consecutive checks.
+
+---
+
+## Privacy
+
+- Drafts are stored in **your browser’s `localStorage`**, on your machine only.
+- Nothing is transmitted by this script.
 
 ---
 
@@ -117,7 +126,7 @@ To prevent the overlay from “moving around” during initial React hydration, 
 
 Most settings can be tweaked inside the script in the `CONFIG` object:
 
-- maximum width cap (fallback)
+- width cap (fallback)
 - autogrow min height and max viewport height
 - draft retention (TTL, max entries)
 - debounce timings
@@ -127,27 +136,30 @@ Most settings can be tweaked inside the script in the `CONFIG` object:
 
 ---
 
-# Compatibility
+## Compatibility
 
-## Userscript
+### Userscript managers
 
-This script is written as a **standard userscript** and does not rely on any special Userscript Manager APIs (`@grant none`).  
-As a result, it should work in most common userscript managers:
+This script is written as a standard userscript and does not rely on special APIs (`@grant none`), so it should work in most common managers:
 
-* ✅ **ViolentMonkey** (tested)
-* ✅ **Tampermonkey** (expected to work)
-* ✅ **Greasemonkey** (expected to work; Firefox)
-* ✅ **Safari Userscripts** (tested)
+- ✅ ViolentMonkey (tested)
+- ✅ Tampermonkey (expected to work)
+- ✅ Greasemonkey (expected to work on Firefox)
+- ✅ Safari Userscripts (tested)
 
-##  TypingMind
+### TypingMind (SPA)
 
-* Since TypingMind is a **single-page app (SPA)**, the script uses a MutationObserver + periodic checks to reattach after rerenders.
-* Some browsers/userscript managers may handle **synthetic keyboard events** differently. The script includes multiple send strategies (Ctrl/Cmd+Enter, Enter, and a send button click fallback) to maximize compatibility.
-* If you encounter issues, please open an issue and include:
-    * browser + version
-    * userscript manager + version
-    * whether sending works via hotkey vs. send button
-    * console logs starting with `[TMPlainComposer]`
+TypingMind is a single-page app (SPA), so the script uses a MutationObserver + periodic checks to reattach after rerenders.
+
+Some browsers/userscript managers may handle synthetic keyboard events differently. The script includes multiple send strategies (Ctrl/Cmd+Enter, Enter, and a send button click fallback) to maximize compatibility.
+
+---
+
+## Known limitations
+
+- This is a **plain text** composer: no rich formatting, no fancy editing features.
+- If TypingMind changes their DOM structure, the script may require updates.
+- Some environments may block synthetic keyboard events; send fallback strategies are included, but edge cases are possible.
 
 ---
 
@@ -155,7 +167,7 @@ As a result, it should work in most common userscript managers:
 
 ### The overlay does not show up
 - Make sure the script is enabled in ViolentMonkey.
-- Hard refresh TypingMind (Ctrl+Shift+R / Cmd+Shift+R).
+- Hard refresh TypingMind (**Ctrl+Shift+R** / **Cmd+Shift+R**).
 - Open DevTools → Console and look for logs starting with:
   - `[TMPlainComposer]`
 
@@ -170,15 +182,25 @@ You can adjust the send strategy options in the script:
 
 ---
 
+## Uninstall
+
+1. Disable or remove the script in your userscript manager.
+2. (Optional) Clear saved drafts from `localStorage`:
+   - search for keys starting with `vm_tm_plain_composer_draft:`.
+
+---
+
 ## Contributing
 
 PRs and improvements are welcome!
 
-If TypingMind changes their DOM and this script breaks, please open an issue with:
-- TypingMind version (if known)
-- screenshots of the composer area
-- the HTML snippet around the composer (`#chat-input-textbox`)
-- console logs
+If TypingMind changes their DOM and the script breaks, please open an issue and include:
+
+- browser + version
+- userscript manager + version
+- whether sending works via hotkey vs send button
+- console logs starting with `[TMPlainComposer]`
+- (optional) HTML snippet around the composer (`#chat-input-textbox`)
 
 ---
 
