@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TypingMind Plain Text Composer (Hide Original)
 // @namespace    vm-typingmind-plain-composer
-// @version      1.5
-// @description  Replace TypingMind input with a plain textarea overlay for smoother typing. Anchors to <main> + caps width to chat column. Smooth reveal (no jitter), autogrow + drafts + cleanup + stability-gated alignment + throttled MutationObserver + non-overlapping toggle UX.
+// @version      1.6
+// @description  Replace TypingMind input with a plain textarea overlay for smoother typing. Anchors to <main> + caps width to chat column. Smooth reveal (no jitter), autogrow + drafts + cleanup + stability-gated alignment + throttled MutationObserver + non-overlapping toggle UX + global hotkeys.
 // @match        https://www.typingmind.com/*
 // @match        https://typingmind.com/*
 // @run-at       document-start
@@ -47,6 +47,11 @@
     stableCheckIntervalMs: 80,
     stableTolerancePx: 2,
     postLockSyncIntervalMs: 350,
+
+    // ---- Global hotkeys ----
+    globalFocusHotkey: true,
+    focusHotkeyRequiresCtrl: true, // Ctrl+` (Backquote)
+    globalEscToggle: true,
   };
 
   const STATE = {
@@ -73,7 +78,7 @@
     layoutLastGeom: null,
     layoutLocked: false,
 
-    // NEW: native was visible at least once
+    // native was visible at least once
     nativeSeenOnce: false,
 
     // timers
@@ -132,6 +137,60 @@
 
     STATE.layoutLastGeom = curr;
     return STATE.layoutStableCount >= CONFIG.stableRequiredCount;
+  }
+
+  // typing context guard (for global hotkeys)
+  function isTypingContext(el) {
+    if (!el) return false;
+    if (el === document.body || el === document.documentElement) return false;
+
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "textarea") return true;
+    if (tag === "input") {
+      const type = (el.getAttribute("type") || "text").toLowerCase();
+      // treat most inputs as typing contexts
+      if (!["checkbox", "radio", "button", "submit", "reset", "range", "color", "file"].includes(type)) {
+        return true;
+      }
+    }
+    if (el.isContentEditable) return true;
+
+    // also catch nested editable contexts
+    if (typeof el.closest === "function") {
+      if (el.closest("textarea, input, [contenteditable='true'], [contenteditable=''], [contenteditable='plaintext-only']")) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // focus helper
+  function focusPlainComposer({ revealIfHidden = true } = {}) {
+    if (!STATE.textareaEl || !STATE.wrapperEl) return;
+
+    if (revealIfHidden) {
+      // if user had original open, flip back to plain overlay
+      if (STATE.originalVisibleByUser) {
+        STATE.originalVisibleByUser = false;
+        showReturnButton(false);
+      }
+      setPlainComposerVisible(true);
+
+      // try to hide real composer again (optional)
+      const real = getRealTextarea();
+      if (real && CONFIG.hideOriginalComposer && isElementVisible(real)) hideRealTextarea(real);
+    }
+
+    syncOverlayToTypingMindLayout();
+
+    // focus + caret at end
+    const ta = STATE.textareaEl;
+    ta.focus({ preventScroll: true });
+    const len = ta.value.length;
+    try {
+      ta.setSelectionRange(len, len);
+    } catch {}
   }
 
   // ---- TypingMind selectors ----
@@ -773,6 +832,11 @@
     syncOverlayToTypingMindLayout();
   }
 
+  // NEW: explicit mutation handler (so throttling calls this)
+  function handleMutations() {
+    installIfNeeded();
+  }
+
   function makeThrottledHandler(fn, intervalMs) {
     let scheduled = false;
     let lastRun = 0;
@@ -799,6 +863,51 @@
     };
   }
 
+  function installGlobalHotkeys() {
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (!STATE.textareaEl) return;
+
+        // ESC anywhere toggles (unless you're typing in another input etc.)
+        if (CONFIG.globalEscToggle && e.key === "Escape") {
+          // If user is typing in some other field (e.g. search), let it handle Escape itself.
+          if (document.activeElement && isTypingContext(document.activeElement) && document.activeElement !== STATE.textareaEl) {
+            return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          toggleOriginalComposer();
+          return;
+        }
+
+        if (!CONFIG.globalFocusHotkey) return;
+
+        // already focused
+        if (document.activeElement === STATE.textareaEl) return;
+
+        // ignore while typing elsewhere
+        if (isTypingContext(document.activeElement)) return;
+
+        // Ctrl+` (or physical Backquote) focuses the overlay
+        const wantsCtrl = CONFIG.focusHotkeyRequiresCtrl ? e.ctrlKey : true;
+        const isBacktick = (e.key === "`" || e.code === "Backquote");
+        const matches = wantsCtrl && isBacktick;
+
+        if (matches) {
+          // Avoid stealing common combos
+          if (e.metaKey || e.altKey) return;
+
+          e.preventDefault();
+          e.stopPropagation();
+
+          focusPlainComposer({ revealIfHidden: true });
+        }
+      },
+      true // capture phase
+    );
+  }
+
   function run() {
     installIfNeeded();
 
@@ -817,12 +926,18 @@
       }
     }, CONFIG.stableCheckIntervalMs);
 
-    const throttled = makeThrottledHandler(installIfNeeded, CONFIG.mutationThrottleMs);
-    const observer = new MutationObserver(throttled);
+    const throttledMutationHandler = makeThrottledHandler(handleMutations, CONFIG.mutationThrottleMs);
+    const observer = new MutationObserver(throttledMutationHandler);
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    log("Initialized TypingMind Plain Composer v1.5 (nativeSeenOnce gating).");
+    installGlobalHotkeys();
+
+    log("Initialized TypingMind Plain Composer v1.6 (global hotkeys).", {
+      mutationThrottleMs: CONFIG.mutationThrottleMs,
+    });
   }
 
   run();
 })();
+
+// vim: set expandtab tabstop=2 shiftwidth=2 softtabstop=2 :
