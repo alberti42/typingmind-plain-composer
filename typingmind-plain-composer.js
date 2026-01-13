@@ -2,7 +2,7 @@
 // @name         TypingMind Minimal Plain Composer (Fast + Send, Dark UI + Toggle + Idle Autogrow + Align)
 // @namespace    vm-typingmind-plain-composer
 // @version      1.7
-// @description  Fast plain textarea overlay. Only touches TypingMind on Send/Toggle. Dark UI + Toggle. Ctrl/Cmd+Enter sends. Esc toggles. Autogrow is idle-debounced. Overlay is aligned/centered to chat column via idle-debounced layout sampling (no observers/polling).
+// @description  Fast plain textarea overlay. Only touches TypingMind on Send/Toggle. Dark UI + Toggle. Ctrl/Cmd+Enter sends. Esc toggles. Autogrow is idle-debounced. Overlay is aligned/centered to chat column via idle-debounced layout sampling (no observers/polling). Hidden until first successful align.
 // @match        https://www.typingmind.com/*
 // @match        https://typingmind.com/*
 // @run-at       document-start
@@ -13,41 +13,34 @@
   "use strict";
 
   const CONFIG = {
-    // fallback max width for overlay
-     alignPaddingPx: 0,     // set to 0 to match exactly; try 16 if you want breathing room
-
-    // NEW: safety clamps (optional)
+    alignPaddingPx: 0,
     minOverlayWidthPx: 360,
-    maxOverlayWidthPx: 9999, // effectively "no cap"; set e.g. 1200 if you want a hard ceiling
+    maxOverlayWidthPx: 9999,
 
     bottomPx: 16,
     rows: 3,
 
-    // ---- Autogrow (idle-debounced) ----
     AUTOGROW_ENABLED: true,
     minHeightPx: 30,
     maxHeightVh: 35,
     autogrowDebounceMs: 160,
 
-    // ---- Alignment (idle-debounced) ----
     ALIGN_ENABLED: true,
     alignDebounceMs: 180,
 
-    // If true, keep a scrollbar instead of resizing (max perf)
     preferScrollbarsOverAutogrow: false,
   };
 
   const STATE = {
-    mode: "plain", // "plain" | "native"
+    mode: "plain",
     wrap: null,
     ta: null,
+
     hasShownOnce: false,
 
-    // autogrow
     autogrowTimer: null,
     lastGrowValueLen: -1,
 
-    // alignment
     alignTimer: null,
     lastAlignSig: "",
   };
@@ -62,7 +55,6 @@
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
-
   function isVisible(el) {
     if (!el) return false;
     const cs = getComputedStyle(el);
@@ -71,7 +63,7 @@
     return r.width > 0 && r.height > 0;
   }
 
-  // ---------- TypingMind selectors (ONLY used on Send/Toggle/Align) ----------
+  // ---------- TypingMind selectors ----------
   function getRealTextarea() {
     return (
       qs("textarea#chat-input-textbox") ||
@@ -82,7 +74,6 @@
   }
 
   function getChatInputContainer() {
-    // These are containers you already had good luck with
     return (
       qs('[data-element-id="message-input"]') ||
       qs('[data-element-id="chat-space-end-part"]') ||
@@ -93,7 +84,6 @@
   }
 
   function getMainAnchor() {
-    // Try to find the visible main chat area
     const mains = qsa("main");
     for (const m of mains) {
       const cs = getComputedStyle(m);
@@ -102,7 +92,6 @@
       if (looksScrollable && isVisible(m)) return m;
     }
 
-    // common TM containers (best-effort)
     const mca = qs('[data-element-id="main-content-area"]');
     if (isVisible(mca)) return mca;
 
@@ -154,9 +143,22 @@
     target.dispatchEvent(up);
   }
 
-  // ---------- Hide/show native (keep measurable!) ----------
-  // NOTE: We do NOT use display:none in plain mode, because that kills the rect width/left.
-  // Instead we make it visually/interaction hidden but still measurable.
+  // ---------- Overlay visibility helpers ----------
+  function hideOverlayUntilReady() {
+    if (!STATE.wrap) return;
+    STATE.wrap.style.opacity = "0";
+    STATE.wrap.style.pointerEvents = "none";
+    // keep it in the DOM so alignment can set width/left without flashing
+  }
+
+  function revealOverlay() {
+    if (!STATE.wrap) return;
+    STATE.wrap.style.opacity = "1";
+    STATE.wrap.style.pointerEvents = "auto";
+    STATE.wrap.style.transform = "translateX(-50%) translateY(0)";
+  }
+
+  // ---------- Hide/show native (keep measurable) ----------
   function hideNativeComposer() {
     const container = getChatInputContainer() || (getRealTextarea() ? getRealTextarea().closest("form") : null);
     if (!container) return false;
@@ -166,7 +168,6 @@
       container.style.opacity = "0";
       container.style.pointerEvents = "none";
       container.style.userSelect = "none";
-      // keep layout/width measurable
     }
     return true;
   }
@@ -199,7 +200,6 @@
       const real = getRealTextarea();
       if (real) real.focus();
 
-      // alignment not needed while hidden, but harmless
       scheduleAlign();
     } else {
       setPlainVisible(true);
@@ -214,7 +214,7 @@
     }
   }
 
-  // ---------- Autogrow (idle-debounced) ----------
+  // ---------- Autogrow ----------
   function doAutogrow() {
     const ta = STATE.ta;
     if (!ta || !CONFIG.AUTOGROW_ENABLED) return;
@@ -247,16 +247,14 @@
     }, CONFIG.autogrowDebounceMs);
   }
 
-  // ---------- Alignment (idle-debounced) ----------
+  // ---------- Alignment ----------
   function computeAnchorRect() {
-    // Prefer the actual input row/container when present (best centering match)
     const input = getChatInputContainer();
     if (input && input.getBoundingClientRect) {
       const r = input.getBoundingClientRect();
       if (r.width > 200) return r;
     }
 
-    // Fallback: main chat area
     const main = getMainAnchor();
     if (main && main.getBoundingClientRect) {
       const r = main.getBoundingClientRect();
@@ -296,20 +294,12 @@
     STATE.wrap.style.left = `${cx}px`;
     STATE.wrap.style.width = `${width}px`;
 
-    // reveal once we have a real measured size
-    if (!STATE.hasShownOnce) {
-      STATE.hasShownOnce = true;
-      STATE.wrap.style.opacity = "1";
-    }
-    STATE.wrap.style.transform = "translateX(-50%) translateY(0)";
-
+    // Only reveal after the first successful alignment
     if (!STATE.hasShownOnce) {
       STATE.hasShownOnce = true;
       revealOverlay();
     }
   }
-
-
 
   function scheduleAlign() {
     if (!CONFIG.ALIGN_ENABLED) return;
@@ -320,7 +310,7 @@
     }, CONFIG.alignDebounceMs);
   }
 
-  // ---------- Send (commit phase) ----------
+  // ---------- Send ----------
   async function sendFromOverlay() {
     const ta = STATE.ta;
     const textTrimmed = (ta?.value ?? "").trim();
@@ -333,7 +323,7 @@
     }
 
     const wasPlain = STATE.mode === "plain";
-    if (wasPlain) showNativeComposer(); // temporarily allow TM to handle send normally
+    if (wasPlain) showNativeComposer();
 
     setNativeValue(real, ta.value);
     real.dispatchEvent(new Event("input", { bubbles: true }));
@@ -375,41 +365,24 @@
   }
 
   // ---------- UI ----------
-
-  function hideOverlayUntilReady() {
-    if (!STATE.wrap) return;
-    STATE.wrap.style.opacity = "0";
-    STATE.wrap.style.pointerEvents = "none";
-  }
-
-  function revealOverlay() {
-    if (!STATE.wrap) return;
-    STATE.wrap.style.opacity = "1";
-    STATE.wrap.style.pointerEvents = "auto";
-  }
-
   function inject() {
     if (document.getElementById("vm-tm-plain-wrap")) return;
 
     const wrap = document.createElement("div");
-    STATE.hasShownOnce = false;
+    wrap.id = "vm-tm-plain-wrap";
 
+    // hidden until first align
     wrap.style.opacity = "0";
     wrap.style.pointerEvents = "none";
-    wrap.style.transition = "opacity 120ms ease";
+    wrap.style.transition = "opacity 120ms ease, transform 120ms ease";
 
-    wrap.id = "vm-tm-plain-wrap";
     wrap.style.position = "fixed";
-    wrap.style.left = "50%"; // will be overwritten by align
+    wrap.style.left = "50%";
     wrap.style.bottom = `${CONFIG.bottomPx}px`;
     wrap.style.zIndex = "2147483647";
     wrap.style.width = "min(900px, calc(100vw - 24px))";
-    wrap.style.pointerEvents = "auto";
     wrap.style.display = "block";
-
-    wrap.style.opacity = "0";
     wrap.style.transform = "translateX(-50%) translateY(6px)";
-    wrap.style.transition = "opacity 120ms ease, transform 120ms ease";
 
     const panel = document.createElement("div");
     panel.style.border = "1px solid rgba(128,128,128,0.35)";
@@ -496,7 +469,6 @@
 
     (document.body || document.documentElement).appendChild(wrap);
 
-    // Keep TypingMind from reacting to keystrokes while you type here
     ta.addEventListener(
       "keydown",
       (e) => {
@@ -522,7 +494,6 @@
       (e) => {
         e.stopPropagation();
         scheduleAutogrow();
-        // do NOT align on every key; alignment is about layout changes, not text
       },
       true
     );
@@ -539,14 +510,14 @@
     STATE.wrap = wrap;
     STATE.ta = ta;
 
-    // Start in plain mode
+    // ensure hidden until align
+    hideOverlayUntilReady();
+
     setMode("plain");
 
-    // Initial autogrow + alignment (debounced)
     scheduleAutogrow();
     scheduleAlign();
 
-    // A few one-shot alignment retries (covers sidebar animation / late layout)
     tryAlignSoon();
     tryHideNativeSoon();
   }
@@ -565,7 +536,6 @@
     tries.forEach((t) => setTimeout(() => scheduleAlign(), t));
   }
 
-  // Optional: global Esc returns to plain if you're in native mode
   function installGlobalEsc() {
     document.addEventListener(
       "keydown",
