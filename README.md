@@ -206,4 +206,5 @@ If TypingMind changes their DOM and the script breaks, please open an issue and 
 
 ## License
 
-MIT (or choose your preferred license).
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
